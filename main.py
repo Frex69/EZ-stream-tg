@@ -1,5 +1,7 @@
 import os
 import json
+import re
+import urllib.parse
 import aiohttp
 from dotenv import load_dotenv
 from telegram import (
@@ -33,7 +35,7 @@ LTC_ADDRESS = "ltc1qczgu6hl7xksc7ga62r222urvad6lek89jtj99l"
 ADMIN_HANDLE = "NOT_SPARSH"
 WHITELIST_FILE = "whitelist.json"
 USERS_FILE = "users.json"
-WHITELIST_ENABLED = True  # Set to False to let anyone use the bot
+WHITELIST_ENABLED = True  
 
 # --- MENU BUTTON STRINGS ---
 MENU_SERIES = "Search TV Series"
@@ -43,16 +45,16 @@ MENU_DONATE = "Donate"
 
 # --- SERVERS ---
 SERIES_SERVERS = {
-    "Server 1": "https://mapple.uk/watch/tv/{tmdb_id}/{season}/{episode}",
-    "Server 2": "https://vidfast.pro/tv/{tmdb_id}/{season}/{episode}",
+    "Server 1": "https://www.vidking.net/embed/tv/{tmdb_id}/{season}/{episode}",
+    "Server 2": "https://vidsrc.ru/tv/{tmdb_id}/{season}/{episode}?autoplay=true&colour=00ff9d&backbutton=https://vidsrc.ru/&logo=https://vidsrc.ru/logo.png",
     "Server 3": "https://player.videasy.net/tv/{tmdb_id}/{season}/{episode}",
     "Server 4": "https://vidlink.pro/tv/{tmdb_id}/{season}/{episode}",
     "Server 5": "https://vidsrc-embed.ru/embed/tv/{tmdb_id}/{season}/{episode}"
 }
 
 MOVIE_SERVERS = {
-    "Server 1": "https://mapple.uk/watch/movie/{tmdb_id}",
-    "Server 2": "https://vidfast.pro/movie/{tmdb_id}",
+    "Server 1": "https://www.vidking.net/embed/movie/{tmdb_id}",
+    "Server 2": "https://vidsrc.ru/movie/{tmdb_id}?autoplay=true&colour=00ff9d",
     "Server 3": "https://player.videasy.net/movie/{tmdb_id}",
     "Server 4": "https://vidlink.pro/movie/{tmdb_id}",
     "Server 5": "https://vidsrc-embed.ru/embed/movie/{tmdb_id}"
@@ -95,10 +97,9 @@ def track_user(user):
         users[chat_id_str] = {
             "username": user.username or "No_Username",
             "first_name": user.first_name or "Unknown",
-            "summon_status": "none"  # "none", "normal", or "force"
+            "summon_status": "none"  
         }
     else:
-        # Update details but keep their summon status intact
         users[chat_id_str]["username"] = user.username or "No_Username"
         users[chat_id_str]["first_name"] = user.first_name or "Unknown"
         if "summon_status" not in users[chat_id_str]:
@@ -110,13 +111,11 @@ def get_admin_id(users_data):
     return next((cid for cid, data in users_data.items() if data.get('username') == ADMIN_HANDLE), None)
 
 def escape_html(text: str) -> str:
-    """Helper to escape HTML to prevent Telegram parsing errors"""
     if not text:
         return "N/A"
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def get_main_menu():
-    """Returns the persistent bottom keyboard layout"""
     keyboard = [
         [KeyboardButton(MENU_SERIES), KeyboardButton(MENU_MOVIES)],
         [KeyboardButton(MENU_CONTACT), KeyboardButton(MENU_DONATE)]
@@ -125,7 +124,9 @@ def get_main_menu():
 
 # --- TMDB FETCHERS ---
 async def fetch_tmdb_search(query: str, search_type="tv"):
-    url = f"https://api.themoviedb.org/3/search/{search_type}?api_key={TMDB_API_KEY}&query={query}&language=en-US&page=1"
+    # Safely encode the query to prevent spaces/symbols from breaking the search
+    safe_query = urllib.parse.quote(query)
+    url = f"https://api.themoviedb.org/3/search/{search_type}?api_key={TMDB_API_KEY}&query={safe_query}&language=en-US&page=1"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.json()
@@ -144,7 +145,7 @@ async def wl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args or len(args) == 0:
-        await update.message.reply_text("Usage:\n/wl list\n/wl add username\n/wl remove username")
+        await update.message.reply_text("Usage:\n/wl list\n/wl add [users]\n/wl remove username")
         return
 
     action = args[0].lower()
@@ -156,11 +157,36 @@ async def wl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif action == "add":
         if len(args) < 2: return
-        username = args[1].replace("@", "")
-        if username not in whitelist:
-            whitelist.append(username)
+        
+        # Parse all potential usernames from the pasted message
+        raw_text = update.message.text
+        words = raw_text.split()[2:] # Skip '/wl' and 'add'
+        
+        added_users = []
+        already_in = []
+        
+        for word in words:
+            # Strip out hyphens, @ symbols, colons, etc.
+            clean_username = re.sub(r'[^a-zA-Z0-9_]', '', word)
+            
+            # Ignore common pasted header words
+            if clean_username.lower() in ["whitelisted", "users", ""]:
+                continue
+                
+            if clean_username in whitelist:
+                already_in.append(clean_username)
+            else:
+                whitelist.append(clean_username)
+                added_users.append(clean_username)
+                
+        if added_users:
             save_whitelist(whitelist)
-            await update.message.reply_text(f"@{username} added to whitelist.")
+            msg = f"✅ Added {len(added_users)} users to whitelist:\n" + ", ".join([f"@{u}" for u in added_users])
+            await update.message.reply_text(msg)
+        elif already_in:
+            await update.message.reply_text(f"⚠️ All provided users were already whitelisted.")
+        else:
+            await update.message.reply_text("❌ Could not find any valid usernames to add.")
             
     elif action == "remove":
         if len(args) < 2: return
@@ -172,7 +198,6 @@ async def wl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"@{username} removed from whitelist.")
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all tracked users, tagging any with an active summon."""
     if update.effective_user.username != ADMIN_HANDLE: return
     users = load_json_file(USERS_FILE, {})
     if not users:
@@ -185,7 +210,6 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a clean message to ALL tracked users."""
     if update.effective_user.username != ADMIN_HANDLE: return
     msg = " ".join(context.args)
     if not msg: return
@@ -199,7 +223,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Broadcast sent successfully to {sent_count} users.")
 
 async def dm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a private message to a specific user via the bot, cleaned of emojis."""
     if update.effective_user.username != ADMIN_HANDLE: return
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /dm username <your message>")
@@ -220,7 +243,6 @@ async def dm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- CHAT & SUMMON SYSTEM ---
 async def summon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pings a user to open a 2-way comms line with /stop option."""
     if update.effective_user.username != ADMIN_HANDLE: return
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /summon username")
@@ -234,7 +256,6 @@ async def summon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"User @{target_uname} not found in database.")
         return
 
-    # Update status in DB
     users[target_id]["summon_status"] = "normal"
     save_json_file(USERS_FILE, users)
 
@@ -249,7 +270,6 @@ async def summon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Failed to summon @{target_uname}.")
 
 async def forcesummon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pings a user, forces comms line, and denies them /stop."""
     if update.effective_user.username != ADMIN_HANDLE: return
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /forcesummon username")
@@ -263,7 +283,6 @@ async def forcesummon_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"User @{target_uname} not found in database.")
         return
 
-    # Update status in DB
     users[target_id]["summon_status"] = "force"
     save_json_file(USERS_FILE, users)
 
@@ -278,7 +297,6 @@ async def forcesummon_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Failed to force-summon @{target_uname}.")
 
 async def endchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to manually close any summon session."""
     if update.effective_user.username != ADMIN_HANDLE: return
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /endchat username")
@@ -292,7 +310,6 @@ async def endchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"User @{target_uname} not found in database.")
         return
 
-    # Update status in DB
     users[target_id]["summon_status"] = "none"
     save_json_file(USERS_FILE, users)
 
@@ -303,7 +320,6 @@ async def endchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User command to stop a normal summon."""
     user_id = str(update.effective_user.id)
     users = load_json_file(USERS_FILE, {})
     
@@ -321,7 +337,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json_file(USERS_FILE, users)
         await update.message.reply_text("You have disconnected from the chat with the Admin.")
         
-        # Alert Admin
         admin_id = get_admin_id(users)
         if admin_id:
             try:
@@ -331,7 +346,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches stray messages and forwards to admin, tagging if they are in an active chat."""
     if not update.message or not update.message.text: return
     user = update.effective_user
     
@@ -347,7 +361,6 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = escape_html(update.message.text)
         handle = user.username or "Unknown"
         
-        # Add a tag so you know if this is an active conversation or just a random message
         prefix = "[Active Chat]" if status in ["normal", "force"] else "[Stray Message]"
         
         try:
@@ -366,7 +379,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"You are not whitelisted. Contact @{ADMIN_HANDLE} for access.")
         return ConversationHandler.END
 
-    track_user(user) # Saves them to the tracking DB
+    track_user(user) 
     text = "Welcome to the EZstream bot!\n\nUse the menu below to navigate:"
     await update.message.reply_text(text, reply_markup=get_main_menu())
     return ConversationHandler.END
@@ -385,18 +398,15 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can also scan this QR code to donate. Thank you for your support!"
     )
     
-    # Send the actual file from your server
     photo_path = 'qr.jpeg'
     if os.path.exists(photo_path):
         try:
             with open(photo_path, 'rb') as photo:
                 await context.bot.send_photo(chat_id=update.message.chat_id, photo=photo, caption=text, parse_mode="HTML")
         except Exception as e:
-            # Fallback to text if the photo cannot be sent
             print(f"Error sending photo: {e}")
             await update.message.reply_text(text, parse_mode="HTML")
     else:
-        # Fallback to text if the file is not there
         await update.message.reply_text(text, parse_mode="HTML")
         
     return ConversationHandler.END
@@ -532,7 +542,6 @@ async def handle_series_callbacks(update: Update, context: ContextTypes.DEFAULT_
         series = await fetch_tmdb_details(tmdb_id, "tv")
         seasons = {s['season_number']: s['episode_count'] for s in series.get('seasons', []) if s['season_number'] > 0}
         
-        # Next / Prev Logic across seasons, text-based
         has_prev, has_next = False, False
         prev_s, prev_e = current_s, current_e
         next_s, next_e = current_s, current_e
@@ -554,18 +563,15 @@ async def handle_series_callbacks(update: Update, context: ContextTypes.DEFAULT_
             next_e = 1
 
         keyboard = []
-        # Server Buttons
         for name, url_template in SERIES_SERVERS.items():
             link = url_template.format(tmdb_id=tmdb_id, season=season_num, episode=ep_num)
             keyboard.append([InlineKeyboardButton(name, url=link)])
             
-        # Navigation Row
         nav_row = []
         if has_prev: nav_row.append(InlineKeyboardButton("<< Prev", callback_data=f"te_{tmdb_id}_{prev_s}_{prev_e}"))
         if has_next: nav_row.append(InlineKeyboardButton("Next >>", callback_data=f"te_{tmdb_id}_{next_s}_{next_e}"))
         if nav_row: keyboard.append(nav_row)
         
-        # Back Button
         ep_count = seasons.get(current_s, 0)
         keyboard.append([InlineKeyboardButton("Back to Episodes", callback_data=f"ts_{tmdb_id}_{season_num}_{ep_count}")])
         
@@ -633,11 +639,9 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Create filter that listens for normal text, but ignores the menu buttons
     menu_regex = f"^({MENU_SERIES}|{MENU_MOVIES}|{MENU_CONTACT}|{MENU_DONATE})$"
     search_text_filter = filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex)
 
-    # Standard Commands and Menu
     entry_handlers = [
         CommandHandler("start", start),
         CommandHandler("wl", wl_command),
@@ -666,8 +670,6 @@ def main():
     app.add_handler(main_conv)
     app.add_handler(CallbackQueryHandler(handle_series_callbacks, pattern="^(tv_|tvs_|ts_|te_|tvres_back$)"))
     app.add_handler(CallbackQueryHandler(handle_movie_callbacks, pattern="^(mov_|movwatch_|movres_back$)"))
-    
-    # Catch any standard text messages (for forward/chat feature)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward_to_admin))
 
     print("Bot is running...")
